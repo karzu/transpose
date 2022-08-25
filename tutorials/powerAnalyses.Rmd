@@ -1,0 +1,418 @@
+---
+title: "Power Analyses - betaSharedTest and twoThetaTest"
+author: "Author: Ksenia Arzumanova"
+output:
+  html_document: default
+---
+
+# Summary 
+
+The following process details how to conduct a power analysis for both the `betaSharedTest` and `twoThetaTest` on simulated gene expression data. The process utilizes the EVE model, described in [Rohlfs, Nielsen 2015](https://academic.oup.com/sysbio/article/64/5/695/1686874), implemented in the `evemodel` package. The first step is to simulate data under the null and alternative distributions. This requires a phylogeny over which to simulate, and parameter value definitions for $\theta, \sigma^2, \alpha$, and $\beta$. The output will include simulated data, a matrix of power values associated with each alternative distribution, and a log-scaled power curve with a point for the false positive rate.
+
+**Please note, there are cells of code where the RMarkdown command `eval = FALSE` is specified so as to only display code without output. Setting the below boolean variable to `TRUE` will allow the cells to evaluate the code, which will take a number of hours. It is recommended to first look through the included examples of output before running the analysis on your local machine.**  
+
+```{r evaluate}
+evalBool <- FALSE
+```
+
+## Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# dependencies
+library(ape)
+library(evemodel)
+library(ggplot2)
+library(MASS)
+library(Rlab)
+```
+
+### Phylogeny
+
+First, we load in the tree. Here we use the `ape` package to read in a tree in parenthetic format, which returns a "phylo" object. The cell then plots the phylogeny.
+
+```{r tree, fig.align='center'}
+phy.string <- "(gar:300,(zebrafish:220,((medaka:120,stickleback:120):60,((esox:100,(central_mudminnow:80,olympic_mudminnow:80):20):25,((grayling1:50,(hucho1:35,(salmon1:20,(charr1:10,(rainbow_trout1:5,coho1:5):5):10):15):15):50,(grayling2:50,(hucho2:35,(salmon2:20,(charr2:10,(rainbow_trout2:5,coho2:5):5):10):15):15):50):25):55):40):80);"
+
+tre <- read.tree(text = phy.string)
+plot(tre) # plot tree
+```
+
+### Parameters
+
+In the cell below, the values for the parameters are specified. Most importantly, $\theta, \sigma^2, \alpha$, and $\beta_{shared}$. $\theta$ indicates the optimal value for an Ornstein–Uhlenbeck (OU) process; $\sigma^2$ determines the magnitude of drift, or OU fluctuations, away from $\theta$; $\alpha$ corresponds to stablizing selection, or the pull towards theta; $\beta_{shared}$ represents the constant value of $\beta$ under the null hypothesis, where $\beta$ parameterizes the ratio of population to evolutionary expression variance.  
+
+```{r parameters}
+# parameter definitions
+
+# basic parameters needed for simulation
+numIndivs <- 4 # number of desired individuals per species - *needs to be defined by user*
+numGenes <- 100 # number of genes per dataset - *needs to be defined by user*
+numSpecies <- length(tre$tip.label) # number of species
+speciesLabels <- rep(tre$tip.label,each=numIndivs) # character vector specifying species names; length should be number of total individuals (species x individuals)
+
+# model parameters - *all need to be defined by user*
+theta <- 50 # optimal value for an OU process 
+sigma2 <- 0.1  # drift, OU fluctuations 
+alpha <- 0.005 # stabilizing selection; pull towards theta - higher values reduce covariance 
+betaShared <- 0.1 # constant value of beta under the null hypothesis 
+```
+
+#### Covariance
+
+The following chunk of code calculates the covariance matrix, which is used to determine parameter values to simulate under. This should be reasonably aligned with the phylogeny - expression covariances vary between pairs of species that are closely and more distantly related. For example, if a disproportionately high $\alpha$ value is used, the covariance is significantly reduced. It's important to look at the `covar` matrix to ensure the magnitudes of covariance are not too small or large.
+
+```{r covariance}
+evolVar <- evolVarOU(tre, rep(alpha, numSpecies*2-2), rep(sigma2, numSpecies*2-2), sigma2/(2*alpha)) # calculates expected evolutionary variance (simga2/2alpha) for all branches
+covar <- covarianceOU(tre, rep(alpha, numSpecies*2-2), evolVar) # uses evolVar to calculate covariance matrix
+
+covar_rank_ref<-matrix(nrow=length(unique(c(covar))), ncol=1) # set up a rank matrix that lists the rankings of the covariances, with 1 being the strongest covariance ranking
+
+covar_rank_ref[,1]<-sort(unique(c(covar)), decreasing=T)
+
+covar_rank<-matrix(nrow=numSpecies,ncol=numSpecies) 
+for(i in 1:numSpecies){
+  for(j in 1:numSpecies){
+    rank <- which(covar_rank_ref==covar[i,j])
+    covar_rank[i,j] <- rank
+  }
+}
+rownames(covar_rank) <- rownames(covar)
+colnames(covar_rank) <- colnames(covar)
+```
+
+Here we visualize the covariance matrix in a heatmap to confirm appropriate clustering. In this example, a few highlights we notice are 1) high covariance along the diagonal, representing a one-to-one relationship; 2) little covariance between "gar" and the rest of the species; and, 3) higher covariance clustering between the two duplicate clades.  
+
+```{r covariance heatmap, echo=FALSE, fig.align='center'}
+labels <- c("gar", "zebrafish", "medaka", "stickleback", "esox", "c. mudminnow", "o. mudminnow",  "grayling 1", "hucho 1", "salmon 1", "charr 1", "r. trout 1", "coho 1", "grayling 2", "hucho 2", "salmon 2", "charr 2", "r. trout 2", "coho 2")
+heatmap(log(covar), col = colorRampPalette(c("white", "dark green"))(14), Colv = c(length(tre$tip.label):1), 
+        Rowv = c(length(tre$tip.label):1), scale="none", labRow = labels, labCol = labels, cexCol = 0.75, cexRow = 0.75)
+
+```
+<br>
+<br>
+Below is an example of an uninformative covariance matrix, where $\alpha$ was chosen disproportionately large and drove the covariance to 0 or nearly 0. Since the stabilizing selection value is so high, the covariance matrix does not tell us anything about the relationships between species. 
+
+```{r bad covariance, echo=FALSE}
+a <- 50
+evolVar <- evolVarOU(tre, rep(a, numSpecies*2-2), rep(sigma2, numSpecies*2-2), sigma2/(2*a))
+covar2 <- covarianceOU(tre, rep(a, numSpecies*2-2), evolVar) 
+
+covar_rank_ref2<-matrix(nrow=length(unique(c(covar2))), ncol=1) 
+
+covar_rank_ref2[,1]<-sort(unique(c(covar2)), decreasing=T)
+
+covar_rank2<-matrix(nrow=numSpecies,ncol=numSpecies) 
+for(i in 1:numSpecies){
+  for(j in 1:numSpecies){
+    rank <- which(covar_rank_ref2==covar2[i,j])
+    covar_rank2[i,j] <- rank
+  }
+}
+rownames(covar_rank2) <- rownames(covar2)
+colnames(covar_rank2) <- colnames(covar2)
+options(width=100)
+```
+
+```{r bad covariance heatmap, echo=FALSE, fig.align='center'}
+labels <- c("gar", "zebrafish", "medaka", "stickleback", "esox", "c. mudminnow", "o. mudminnow",  "grayling 1", "hucho 1", "salmon 1", "charr 1", "r. trout 1", "coho 1", "grayling 2", "hucho 2", "salmon 2", "charr 2", "r. trout 2", "coho 2")
+heatmap(covar2, col = colorRampPalette(c("white", "dark green"))(14), Colv = c(length(tre$tip.label):1), Rowv = c(length(tre$tip.label):1),
+        labRow = labels, labCol = labels, cexCol = 0.75, cexRow = 0.75)
+
+```
+
+## Process - Beta Shared Test
+
+### Simulation and Testing
+
+Below is the definition for a function that simulates data to be used for a power analysis, followed by running the `betaSharedTest` on the simulated dataset. Both the simulated dataset and the resulting *log-scaled* LRTs are saved to a file. The function takes in the value for the `betaShared` parameter, the value for the beta parameter under the alternative hypothesis, the number of desired genes to simulate, and the number of desired datasets to be simulated for each beta under the alternative hypothesis. 
+
+```{r func def betaShared test}
+simulate_computeLRT.betaShared <- function(nullBeta, altBeta, numGenes, numDatasets){
+  
+  # simulate 1 dataset of gene expression under the alternative distribution; the number of genes is determined by the number of datasets
+  simAlt <- simOneTheta(n=numDatasets, tree=tre, colSpecies=speciesLabels, theta = theta, sigma2 = sigma2, alpha = alpha, beta = altBeta)
+  
+  # for each dataset, simulate (numGenes-1) genes under nullBeta, and take one row from simAlt to append to the bottom of the dataset
+  for(i in 1:numDatasets){
+    
+    # simulate data
+    simNull <- simOneTheta(n=numGenes-1, tree=tre, colSpecies=speciesLabels, theta = theta, sigma2 = sigma2, alpha = alpha, beta = nullBeta)
+    simData <- rbind(simNull, simAlt[i,]) 
+    # save dataset
+    simFile <- paste("sim", i, "_theta", theta, "_sigma2", sigma2, "_alpha", alpha, "_betaShared", nullBeta, "_betaAlt", altBeta,".csv", sep="")
+    write.csv(simData, file = simFile)
+    
+    #run EVE - conduct a betaShared test that will return LRTs for each gene in the dataset
+    test <- betaSharedTest(tre, simData, cores=4)
+    LRT <- as.data.frame(test$LRT)
+    # save LRTs
+    lrtFile <- paste("res", i, "_theta", theta, "_sigma2", sigma2, "_alpha", alpha, "_betaShared", nullBeta, "_betaAlt", altBeta, ".csv", sep="")
+    write.csv(LRT, file = lrtFile)
+    
+  }
+}
+```
+
+Using the defined function `test.betaShared`, 100 datasets are simulated for each alternative beta in the set (0.01, 0.05, 0.1, 0.3, 0.5, 1, 5, 10, 25, 50, 75, 100), which includes the null beta as a point for false positive rate. 
+
+```{r run betaShared test, eval = evalBool}
+# run the function - user defines the vector of betas under the alternative distribution
+
+altBetas <- c(0.01, 0.05, 0.1, 0.3, 0.5, 1, 5, 10, 25, 50, 75, 100) # define a vector of betas under the alternative distribution, including an altBeta = betaShared to have an FPR point in the power analysis
+
+for(altBeta in altBetas){ 
+  simulate_computeLRT.betaShared(betaShared, altBeta, 100, 100) # simulated 100 genes and 100 datasets per alternative beta
+}
+```
+
+Below is an example of simulated expression data, with the last gene under $\beta = 0.01$, and the remainder under $\beta = 0.1$. As expected, gene expression is centered around $\theta = 50$ and the variance of each gene tends toward $\frac{\sigma^2}{2\alpha}$. Please note that, effectively, the same gene is repeatedly simulated to construct the dataset. For this reason, we don't see significantly varying expression levels across genes, which would be representative of true transcriptomic data. If appropriate parameter values were chosen, the resulting dendrogram should roughly reflect the phylogeny.
+
+```{r betaShared expression data, echo=FALSE, warning = FALSE, fig.align='center'}
+library(pheatmap)
+gene.data <- read.csv("https://raw.githubusercontent.com/karzu/data/main/sim1_theta50_sigma20.1_alpha0.005_betaShared0.1_betaAlt0.01.csv", row.names=1)
+pheatmap(gene.data, cluster_rows = FALSE, scale="none", fontsize_row = 4, fontsize_col = 5, border_color = NA,
+         display_numbers = round(gene.data), fontsize_number = 3, angle_col = 315, na_col = "black")
+```
+
+Next is an example of the distribution of the LRTs from a `betaShared` test on the data above. The distribution is visualized as a histogram of the LRTs, for each gene, on a log-scale, with the bar on the far right representing the gene under the alternative distribution.  
+
+```{r betaShared LRTs, echo=FALSE, message = FALSE, warning = FALSE}
+url1 <- "https://github.com/karzu/data/blob/main/LRThist.png?raw=true"
+
+```
+<center>
+![](`r url1`){width=60%}
+</center>
+
+### Calculating Power
+
+Below is the definition of the power analysis function that reads in the LRT file, extracts the LRT for the last gene simulated under the alternative distribution, returns the proportion of significant LRTs across all datasets for a single beta under the alternative distribution. The significance threshold was calculated from null distribution simulations, and corresponds to a significance level of 5%. We recommend to conduct null distribution simulations to calculate significance thresholds based on significance levels appropriate for your needs. The function takes in a vector of betas under the alternative hypothesis, the number of datasets for each beta in the vector of betas under the alternative hypothesis, and a critical value. The output of the function is a matrix, where each row corresponds to one of the betas from the vector of betas under the alternative hypothesis, and reports its power. 
+
+```{r func def betaShared power}
+power.betaShared <- function(nullBeta, altBetas, numDatasets, critVal){
+  
+  power <- function(altBeta, numDatasets){
+    
+    powerProportion <- 0 # initialize the proportion of significant p-values across all datasets for a single beta under the alternative distribution
+    for(i in 1:numDatasets){
+      fileName = paste("res", i, "_theta", theta, "_sigma2", sigma2, "_alpha", alpha, "_betaShared", nullBeta, "_betaAlt", altBeta, ".csv", sep="") # filename for LRTs
+      LRTs <- read.csv(fileName, row.names=1) # read in the LRT file
+      altLRT <- LRTs$test.LRT[numGenes] # extract LRT for the last gene simulated under altBeta
+      if(altLRT >= critVal) powerProportion = powerProportion + 1 # if LRT is significant, increase power proportion
+    }
+    powerProportion = powerProportion/numDatasets
+    return(powerProportion)
+  }
+  
+  powerMat <- data.frame(altBeta = NA, power = NA) # create a matrix that associates each altBeta with its power
+  
+  for(beta in altBetas){
+    if((which(altBetas == beta)) == 1){
+      powerMat$altBeta <- beta
+      powerMat$power <- power(beta, numDatasets)
+    }
+    else {
+      powerMat <- rbind(powerMat, c(beta, power(beta, numDatasets)))
+    }
+  }
+  
+  return(powerMat) # return the power matrix
+}
+```
+
+In the next cell, we define the plotting function. The function takes in the same arguments as `power.betaShared`, runs the function, and outputs the power curve. The subsequent cell runs the defined function on the globally-defined variables, and uses 4.69 as the critical value, which was calculated from our null distribution simulations.
+
+```{r func def betaShared power plot}
+plotPower.betaShared <- function(nullBeta, altBetas, numDatasets, critVal){
+  
+  power <- power.betaShared(nullBeta, altBetas, numDatasets, critVal)
+  plot(power$altBeta, power$power, log = "x", xaxt = "n", ylab = "proportion of cases rejecting the null", 
+            xlab = expression(paste(beta[alt])),
+            main = expression(paste("Power for ", beta[shared], " test")))
+  abline(h = 0.05, col="#cb4154", lty = 3)
+  labels <- c(power$altBeta)
+  axis(1, labels)
+  grid()
+}
+```
+
+```{r run betaShared power plot, eval = evalBool}
+plotPower.betaShared(betaShared, altBetas, 100, 4.69) # run the power curve function for a significance level of 0.05
+```
+
+Below is an example of the power curve plot.
+```{r betaShared power curve example, include=FALSE}
+url2<-"https://github.com/karzu/data/blob/main/betaPowerCurve.png?raw=true"
+```
+ 
+ 
+<center>
+![](`r url2`){width=60%}
+</center>
+
+## Process - Theta Shift Test
+
+For the theta shift test, we use the same phylogenetic tree, and the same null distribution parameters. In this example, we are interested in analyzing EVE's ability to detect a shift in $\theta$ depending on the location of the shift along the phylogeny. We focus on two shift points (refer to image below) on the salmonid phylogeny to simulate varying magnitudes of $\theta$ shifts. The shift points are defined as the MRCA of the group of interest, indicated by specifying the index of the first species of the group. For example, for our first shift point below, we specify an index of 14, which corresponds to "grayling2".
+
+```{r shift points}
+shiftPoints <- c(14, 17) # corresponds to the stars on the diagram below, starting from the root down
+```
+
+```{r shift points plot, echo = FALSE}
+url3 <- "https://github.com/karzu/data/blob/main/thetaShiftPoint.png?raw=true"
+```
+<center>
+![](`r url3`){width=60%}
+</center>
+
+### Simulation and Testing
+
+Below is the definition of a function that simulates a single dataset for each $\theta_2$ at each shift point. Unlike the power analysis for the `betaShared` test, where several datasets are needed, the `thetaShift` power analysis only necessitates a single dataset, because each gene is under the alternative distribution (a two-theta EVE model). The function then performs a `twoThetaTest` on the simulated dataset. Both the simulated dataset and the resulting *log-scaled* LRTs are saved to a file. The function takes in a vector of shift points, a vector of $\theta_2$, and the number of desired genes. 
+
+```{r func def thetaShift test}
+
+simulate_computeLRT.thetaShift <- function(shiftPoints, thetaVals, numGenes){
+  for(sP in shiftPoints) {
+    thetaShiftBool <- 1:Nedge(tre) %in% getEdgesFromMRCA(tre, tips = tre$tip.label[sP:length(tre$tip.label)], includeEdgeToMRCA = T)
+    
+    for(theta2 in thetaVals){
+      
+      #simulate data
+      simThetaShift <- simTwoTheta(numGenes, tre, colSpecies = colSpecies, isTheta2edge = thetaShiftBool, 
+                                   theta1=theta, theta2=theta2, sigma2 = sigma2, alpha = alpha, beta = beta)
+      simFile <- paste("sim_sp", sP, "_theta1", theta, "_theta2", theta2, "_sigma2", sigma2, "_alpha", alpha, "_beta", betaShared,".csv", sep="")
+      write.csv(simThetaShift, simFile)
+      
+      #run EVE
+      test <- twoThetaTest(tree = tre, gene.data = simThetaShift, isTheta2edge = thetaShiftBool, colSpecies = colSpecies, cores=4)
+      LRT <- as.data.frame(test$LRT)
+      lrtFile <- paste("res_sp", sP, "_theta1", theta, "_theta2", theta2, "_sigma2", sigma2, "_alpha", alpha, "_beta", betaShared,".csv", sep="")
+      write.csv(LRT, lrtFile)
+      
+    }
+  }
+}
+```
+
+Using the defined function `simulate_computeLRT.thetaShift`, a single dataset of 100 genes is simulated for each $\theta_2$ in the set {5, 20, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 90, 100}, which includes $\theta_1$ as a point for false positive rate. Each simulated dataset is subsequently tested for a $\theta$ shift.
+
+```{r run thetaShift test, eval = evalBool}
+thetas <- c(5, 20, 30, 35, 40, 45, 50, 55, 60, 65, 70, 75, 90, 100) # values for theta2 under the two-theta model, for the first shift point
+
+simulate_computeLRT.thetaShift(shiftPoints, thetas, 100) # run the function on the above vector of theta2, simulating datasets of 100 genes
+
+```
+
+Example of expression data with a $\theta$ shift at shift point 14 ("grayling2"), and $\theta_1=50$ and $\theta_2=5$. As expected, gene expression is centered around $\theta_1 = 50$ for the clade preceding the shift point, with a noticeable shift towards $\theta_2 = 5$ for the species after the shift point.
+
+```{r thetaShift expression data, echo=FALSE, message = FALSE, warning = FALSE, fig.align='center'}
+gene.data <- read.csv("https://raw.githubusercontent.com/karzu/data/main/sim_sp14_theta150_theta25_sigma20.1_alpha0.005_beta0.1.csv", row.names=1)
+pheatmap(gene.data, cluster_rows = FALSE, scale="none", fontsize_row = 5, fontsize_col = 5, border_color = NA,
+         display_numbers = round(gene.data), fontsize_number = 3, angle_col = 315)
+```
+
+Next are two examples of the distribution of the LRTs from a `thetaShift` test. The first is a histogram of the LRTs for a dataset simulated under a single $\theta = 50$ and all genes are under $\beta_{shared}$. The second is a histogram of the LRTs for the dataset simulated above. Each LRT corresponds to a single gene, and is visualized on a log-scale. Both sets of LRTs resulted from a `thetaShift` test, testing for a theta shift at shift point 14.     
+
+```{r thetaShift LRTs, echo=FALSE, fig.align='center', warning = FALSE}
+LRTs_noShift <- read.csv("https://raw.githubusercontent.com/karzu/data/main/res_sp14_theta150_theta250_sigma20.1_alpha0.005_beta0.1.csv", row.names=1)
+LRTs_thetaShift <- read.csv("https://raw.githubusercontent.com/karzu/data/main/res_sp14_theta150_theta25_sigma20.1_alpha0.005_beta0.1.csv", row.names=1)
+par(mfrow=c(1,2))
+hist(LRTs_noShift[[1]],  main = "Histogram of log-scaled LRTs under no shift", xlab = "log(LRTs)", xlim = c(-10, 50), cex.main = 0.75)
+hist(LRTs_thetaShift[[1]], breaks=20, main = "Histogram of log-scaled LRTs under shift", xlab = "log(LRTs)", xlim = c(-10, 50), cex.main = 0.75)
+```
+
+### Calculating Power
+
+Below is the definition of the power analysis function that reads in the LRT file and returns the proportion of significant LRTs across all genes for each $\theta_2$ at a single shift point. The significance threshold was calculated from null distribution simulations, and corresponds to a significance level of 5%. We recommend to conduct null distribution simulations to calculate significance thresholds based on significance levels appropriate for your needs. The function takes in a shift point, a vector of $\theta_2$ values, and a critical value. The output of the function is a matrix for a particular shift point, where each row corresponds to one of the $\theta_2$ values, and reports its power. 
+
+
+```{r func def thetaShift power}
+
+power.thetaShift <- function(shiftPoint, thetas, critVal){
+  
+  meanExpDiff <- function(data){
+    colIndex <- shiftPoint*numIndivs - (numIndivs-1)
+    group1.meanExp <- mean(data[ , 1:(colIndex-1)])
+    group2.meanExp <- mean(data[ , colIndex:(numSpecies*numIndivs)])
+    return(group2.meanExp - group1.meanExp)
+  }
+  
+  powerMat <- data.frame(thetaShift = NA, power = NA, meanExpDiff = NA)
+  
+  for(theta2 in thetas){
+    fileName.LRT = paste("res_sp", shiftPoint, "_theta1", theta, "_theta2", theta2, "_sigma2", sigma2, "_alpha", alpha, "_beta", betaShared,".csv", sep="")
+    fileName.sim = paste("sim_sp", shiftPoint, "_theta1", theta, "_theta2", theta2, "_sigma2", sigma2, "_alpha", alpha, "_beta", betaShared,".csv", sep="")
+    LRTs <- read.csv(fileName.LRT, row.names=1)
+    sim <- as.matrix(read.csv(fileName.sim, row.names=1))
+    
+    power <- sum(LRTs$test.LRT >= critVal)/numGenes
+    
+    if((which(thetas == theta2)) == 1){ #if the first theta, fill in the template matrix
+      powerMat$thetaShift <- theta2
+      powerMat$power <- power
+      powerMat$meanExpDiff <- meanExpDiff(sim)
+    }
+    else { #otherwise bind by rows
+      powerMat <- rbind(powerMat, c(theta2, power, meanExpDiff(sim)))
+    }
+  }
+  return(powerMat)
+}
+```
+
+In the next cell, we define the plotting function. The function takes in the same arguments as `power.thetaShift`, runs the function on the selected shift point, and outputs two equivalent power curves. The distinction between the two power curves is the x-axis. The first plots the proportion of cases rejecting the null hypothesis against the value of $\theta_2$ under the two-theta EVE model. The second plots the same proportion of cases rejecting the null hypothesis against the mean expression difference between the $\theta_1$ and $\theta_2$ groups. This is to compare the theoretical magnitude of the shifted gene expression, due to the theta shift, to the actualized shift in gene expression. 
+
+```{r func def thetaShift power plot}
+
+plotPower.thetaShift <- function(shiftPoint, thetas, critVal){
+  
+  power <- power.thetaShift(shiftPoint, thetas, critVal)
+  
+  par(mfrow=c(2,1))
+  plot(power$thetaShift, power$power, ylab = "proportion of cases rejecting the null", 
+            xlab = expression(paste(theta[2])),
+            main = expression(paste("Power for ", theta, " shift test")),
+            xlim = c(min(thetas), max(thetas)),
+            ylim = c(0, 1))
+  abline(h = 0.05, col="#cb4154", lty = 3)
+  grid()
+  plot(power$meanExpDiff, power$power, ylab = "proportion of cases rejecting the null", 
+            xlab = expression(paste("Mean expression difference between ", theta[1], " and ", theta[2], " groups")),
+            main = expression(paste("Power for ", theta, " shift test")),
+            xlim = c(floor(min(power$meanExpDiff)), ceiling(max(power$meanExpDiff))),
+            ylim = c(0, 1))
+  abline(h = 0.05, col="#cb4154", lty = 3)
+  grid()
+}
+```
+
+In order to run the above function, the shift point needs to be specified. The user changes the value of the first variable below, which will get passed to `plotPower.thetaShift`. We use 6.28 as the critical value, which was calculated from our null distribution simulations.
+
+```{r run thetaShift power plot, eval = evalBool}
+shift <- 14 # user-specified shift point
+plotPower.thetaShift(shift, thetas, 6.28) # run the power curve function on the specified shift point for a significance level of 0.05
+```
+
+Below are the power curve plots for the `twoThetaTest` at shift point 14 and 17, respectively, with $\theta_1=50$. Due to the shorter timescale at the more recent shift point, gene expression will not reach the same level of saturation post-shift if using the same set of $\theta_2$ values that were used to simulated datasets at shift point 14. Therefore, for the purpose of this tutorial, a separate set of $\theta_2$ values was chosen, such that the actualized strength of shift is similar to that which was produced for the first shift point. The set of $\theta_2$ values used for shift point 17 was {-150, -100, -50, -25, 0, 10, 20, 30, 50, 70, 80, 90, 100, 125, 150, 200, 250}. Comparing the two power plots, we notice a slight increase in power for the more recent shift. This is reasonable, given that the magnitude in actualized shift is roughly equal, therefore a shift in $\theta$ is more detectable on a shorter evolutionary time-scale. 
+
+```{r thetaShift power curve example, echo = FALSE}
+url4 <- "https://github.com/karzu/data/blob/main/thetaPowerCurve1.png?raw=true"
+url5 <- "https://github.com/karzu/data/blob/main/thetaPowerCurve2.png?raw=true"
+```
+<center>
+![](`r url4`){width=80%}
+</center>
+<center>
+![](`r url5`){width=80%}
+</center>
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,229 @@
+---
+title: "EVE Analyses - Testing for Theta Shifts and Deviations from Beta Shared"
+author: "Author: Ksenia Arzumanova"
+output:
+  html_document: default
+---
+
+# Summary
+
+In this analysis, we demonstrate how to use the `betaSharedTest` and `twoThetaTest` functionalities in the EVE model, described in [Rohlfs, Nielsen 2015](https://academic.oup.com/sysbio/article/64/5/695/1686874). The data given is a simulated dataset of 1000 genes. Subsets of the dataset were simulated under different evolutionary schemes, explained further down. Example of expected likelihood ratio test statistics (LRTs) are then visualized. 
+
+**Please note, there are cells of code where the RMarkdown command `eval = FALSE` is specified so as to only display code without output. Setting the below boolean variable to `TRUE` will allow the cells to evaluate the code. Only change the boolean value when ready to perform the tests and have set up your working directory.**  
+
+```{r evaluate}
+evalBool <- FALSE
+```
+
+## Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# dependencies
+library(ape)
+library(evemodel)
+library(ggplot2)
+library(MASS)
+library(Rlab)
+```
+
+### Phylogeny 
+
+First, we load in the tree. Here we use the `ape` package to read in a tree in parenthetic format, which returns a "phylo" object. The cell the plots the phylogeny.
+
+```{r tree}
+phy.string <- "(gar:300,(zebrafish:220,((medaka:120,stickleback:120):60,((esox:100,(central_mudminnow:80,olympic_mudminnow:80):20):25,((grayling1:50,(hucho1:35,(salmon1:20,(charr1:10,(rainbow_trout1:5,coho1:5):5):10):15):15):50,(grayling2:50,(hucho2:35,(salmon2:20,(charr2:10,(rainbow_trout2:5,coho2:5):5):10):15):15):50):25):55):40):80);"
+
+tre <- read.tree(text = phy.string)
+numIndivs <- 4 # number of desired individuals per species - *needs to be defined by user*
+numSpecies <- length(tre$tip.label)
+speciesLabels <- rep(tre$tip.label,each=numIndivs)
+
+plot(tre) # plot tree
+```
+
+## Process
+
+```{r read in data, warning=FALSE, include=FALSE}
+#gene.data <- read.csv("https://raw.githubusercontent.com/karzu/data/main/empiricalData.csv", row.names = 1)
+path <- textConnection(readLines("https://raw.githubusercontent.com/karzu/data/main/empiricalData.csv"))
+gene.data <- read.csv(path, as.is=T, row.names=1)
+gene.data <- as.matrix(gene.data)
+```
+
+The data is passed to the `gene.data` variable. Below is the table that describes the simulation schemes used to create the data. 
+
+```{r simulation scheme, include=FALSE}
+scheme <- "https://github.com/karzu/data/blob/main/simulationScheme.png?raw=true"
+```
+<center>
+![](`r scheme`){width=60%}
+</center>
+
+**Scheme 2**
+
+The following phylogeny depicts where the shift occurs for Scheme 2. The first variable created in the cell below stores boolean values corresponding to whether or not the branch is included in the shift. This variable will be used later when conducting the `twoThetaTest`. 
+
+```{r plot scheme 2, echo=TRUE}
+thetaShiftBool_full <- 1:Nedge(tre) %in% getEdgesFromMRCA(tre, tips = tre$tip.label[14:length(tre$tip.label)], includeEdgeToMRCA = T)
+
+#pdf(file = "figs/Figure 4A.pdf")
+plot(tre,edge.color = ifelse(thetaShiftBool_full,"salmon","black"),edge.width = 2)
+#dev.off()
+```
+
+Below is a violin plot that describes the distribution of gene expression across each gene in Scheme 2. The first violin corresponds to one of the genes simulated under Scheme 1 for comparison. The remainder of the violins each correspond to exactly one gene, with each data point within the individual violins representing a single individual. As expected, we notice that as $\theta_2$ increases, so does the impact of a theta shift on gene expression, producing a wider spread. 
+
+```{r violin plots 986-990, echo=FALSE}
+violinData <- data.frame(theta2 = c(rep("50", numSpecies*numIndivs), rep("60", numSpecies*numIndivs), rep("70", numSpecies*numIndivs), rep("80", numSpecies*numIndivs), rep("90", numSpecies*numIndivs), rep("100", numSpecies*numIndivs)),
+                         expression = c(gene.data[950,], gene.data[986,], gene.data[987,], gene.data[988,], gene.data[989,], gene.data[990,]),
+                         species = rep(c(rep("black", 13*numIndivs), rep("salmon", 6*numIndivs)), 6))
+violinData$theta2 <- as.numeric(as.character(violinData$theta2))
+
+#pdf(file = "figs/Figure 4B.pdf")
+p <- ggplot(violinData, aes(x=as.factor(theta2), y=expression, fill=theta2)) + 
+  xlab(expression(theta[2])) +
+  ylim(40,80) +
+  geom_violin(show.legend = FALSE) +
+  theme_bw()
+p + geom_jitter(shape=16, position=position_jitter(0.2), alpha=0.5, show.legend = FALSE, aes(color=species)) + scale_colour_identity()
+#dev.off()
+
+```
+
+**Scheme 3**
+
+The following phylogeny depicts where the shift occurs for Scheme 3. Similarly to Scheme 2, the first variable created in the cell below stores boolean values corresponding to whether or not the branch is included in the shift. 
+
+```{r plot scheme 3, echo=TRUE}
+thetaShiftBool_partial <- 1:Nedge(tre) %in% getEdgesFromMRCA(tre, tips = tre$tip.label[17:length(tre$tip.label)], includeEdgeToMRCA = T)
+
+#pdf(file = "figs/Figure 4A.pdf")
+plot(tre,edge.color = ifelse(thetaShiftBool_partial,"salmon","black"),edge.width = 2)
+#dev.off()
+```
+
+Below is a violin plot that describes the distribution of gene expression across each gene in Scheme 3. The first violin corresponds to one of the genes simulated under Scheme 1 for comparison. The remainder of the violins each correspond to exactly one gene, with each data point within the individual violins representing a single individual. We notice that as $\theta_2$ increases, the impact of the theta shift on the spread of gene expression is not as great as in Scheme 2. This is likely due to the theta shift occurring more recently in evolutionary time - the shift didn't have as much time to saturate. 
+
+```{r violin plots 991-995, echo=FALSE}
+violinData <- data.frame(theta2 = c(rep("50", numSpecies*numIndivs), rep("60", numSpecies*numIndivs), rep("70", numSpecies*numIndivs), rep("80", numSpecies*numIndivs), rep("90", numSpecies*numIndivs), rep("100", numSpecies*numIndivs)),
+                         expression = c(gene.data[950,], gene.data[991,], gene.data[992,], gene.data[993,], gene.data[994,], gene.data[995,]),
+                         species = rep(c(rep("black", 16*numIndivs), rep("salmon", 3*numIndivs)), 6))
+violinData$theta2 <- as.numeric(as.character(violinData$theta2))
+
+p <- ggplot(violinData, aes(x=as.factor(theta2), y=expression, fill=theta2)) + 
+  xlab(expression(theta[2])) +
+  ylim(40,80) +
+  geom_violin(show.legend = FALSE)  +
+  theme_bw()
+p + geom_jitter(shape=16, position=position_jitter(0.2), alpha=0.5, show.legend = FALSE, aes(color=species)) + scale_colour_identity()
+```
+
+## TESTS
+
+This next section demonstrates how to use the `twoThetaTest` and `betaSharedTest` tests on the simulated dataset. The resulting LRTs of the simulated dataset are then compared to the LRTs under a null distribution. To determine significance thresholds for the LRTs of the simulated dataset, we simulated 100 datasets of 1000 genes under the null distribution. Three tests were then performed on the 100 datasets: 1) a `twoThetaTest` specifying the shift under Scheme 2; 2) a `twoThetaTest` specifying the shift under Scheme 3; and 3) a `betaSharedTest`. The distributions of LRTs were then used to identify the critical value for a 5% significance level. This part of the analysis is left out of the tutorial, however the next cell demonstrates how to do the tests on a single null distribution simulated dataset, and can be incorporated into a for loop. The simulation parameter values defined below are the same ones described in Scheme 1. 
+
+```{r null distributions, eval = evalBool}
+
+theta <- 50
+sigma2 <- 0.1
+alpha <- 0.005
+betaShared <- 0.1
+
+set.seed(3)
+
+nullData_1000genes <- simOneTheta(n=1000, tree=tre, colSpecies=speciesLabels, theta = theta, sigma2 = sigma2, alpha = alpha, beta = betaShared)
+
+test.nullData_full <- twoThetaTest(tree = tre, gene.data = nullData_1000genes, isTheta2edge = thetaShiftBool_full, colSpecies = speciesLabels) #, cores=4) 
+# null distribution for a theta shift test on the full duplicate clade
+
+test.nullData_partial <- twoThetaTest(tree = tre, gene.data = nullData_1000genes, isTheta2edge = thetaShiftBool_partial, colSpecies = speciesLabels) #, cores=4) # null distribution for a theta shift test on the more recent shift
+
+test.nullData_betaShared <- betaSharedTest(tree = tre, gene.data = nullData_1000genes, colSpecies = speciesLabels) #, cores =4)
+```
+
+**Scheme 2 Test**
+
+Here we conduct a `twoThetaTest` on the entire simulated dataset, specifying which edges are under a theta shift. For this first test, the edges correspond to the first shift described in Scheme 2. The LRTs from the test are then compared to the LRTs from the appropriate null distribution. 
+
+```{r thetaShift test full, eval = evalBool}
+#theta shift test (genes 986-990)
+test.thetaShift_full <- twoThetaTest(tree = tre, gene.data = gene.data, isTheta2edge = thetaShiftBool_full, colSpecies = speciesLabels) #, cores=4)
+
+idx <- c(1:985, 986:990)
+
+#pdf(file = "figs/Figure 4C.pdf")
+qqplot(test.nullData_full$LRT[idx], test.thetaShift_full$LRT[idx], main = "Log-scaled LRTs of empirical data vs \nlog-scaled LRTs of null distribution",
+       xlab = "log(LRTs) of null distribution", ylab = "log(LRTs) of empirical data", 
+       pch = 16,
+       col=c(rep("black", 985), rep("salmon", 5), rep("black", 10))[order(test.thetaShift_full$LRT[idx])])
+abline(a=0, b=1)
+abline(h = 6.28, v = 6.28, col="#cb4154", lty = 3) # the horizontal and vertical lines are determined by the critical values, which were calculated outside of this tutorial
+#dev.off()
+```
+
+Below is an example of the above plot.
+
+```{r thetaShift test full plot, echo=FALSE}
+url1 <- "https://github.com/karzu/data/blob/main/thetaShift_full_plot.png?raw=true"
+```
+<!-- <center> -->
+<!-- ![](`r url1`){width=60%} -->
+<!-- </center> -->
+
+**Scheme 3 Test**
+
+Next, the `twoThetaTest` is again performed on the entire simulated dataset, this time specifying the edges that correspond to the second shift described in Scheme 3. The LRTs from the test are then compared to the LRTs from the appropriate null distribution.
+
+```{r thetaShift test partial, eval = evalBool}
+#theta shift test (genes 991-995)
+test.thetaShift_partial <- twoThetaTest(tree = tre, gene.data = gene.data, isTheta2edge = thetaShiftBool_partial, colSpecies = speciesLabels) #, cores=4)
+
+idx <- c(1:985, 991:995)
+
+#pdf(file = "figs/Figure 4D.pdf")
+qqplot(test.nullData_partial$LRT[idx], test.thetaShift_partial$LRT[idx], main = "Log-scaled LRTs of empirical data vs \nlog-scaled LRTs of null distribution",
+       xlab = "log(LRTs) of null distribution", ylab = "log(LRTs) of empirical data", pch = 16,
+       col=c(rep("black", 985), rep("salmon", 5), rep("black", 5))[order(test.thetaShift_partial$LRT[idx])])
+abline(a=0, b=1)
+abline(h = 3.51, v = 3.51, col="#cb4154", lty = 3) # the horizontal and vertical lines are determined by the critical values, which were calculated outside of this tutorial
+#dev.off()
+```
+
+Below is an example of the above plot.
+
+```{r thetaShift test partial plot, echo=FALSE}
+url2 <- "https://github.com/karzu/data/blob/main/thetaShift_partial_plot.png?raw=true"
+```
+<!-- <center> -->
+<!-- ![](`r url2`){width=60%} -->
+<!-- </center> -->
+
+**Scheme 4 Test**
+
+Lastly, the `betaSharedTest` is performed on the entire simulated dataset. The LRTs from the test are then compared to the LRTs from the appropriate null distribution.
+
+```{r betaShared test, eval = evalBool}
+test.betaShared <- betaSharedTest(tree = tre, gene.data = gene.data, colSpecies = speciesLabels) #, cores =4)
+
+idx <- c(1:985, 996:1000)
+
+#pdf(file = "figs/Figure 5.pdf")
+qqplot(test.nullData_betaShared$LRT[idx], test.betaShared$LRT[idx], main = "Log-scaled LRTs of empirical data vs \nlog-scaled LRTs of null distribution",
+       xlab = "log(LRTs) of null distribution", ylab = "log(LRTs) of empirical data", pch = 16,
+       col=c(rep("black", 985), rep("salmon", 5))[order(test.betaShared$LRT[idx])])
+abline(a=0, b=1)
+abline(h = 4.69, v = 4.69, col="#cb4154", lty = 3) # the horizontal and vertical lines are determined by the critical values, which were calculated outside of this tutorial
+#dev.off()
+```
+
+Below is an example of the above plot.
+
+```{r betaShared test plot, echo=FALSE}
+url3 <- "https://github.com/karzu/data/blob/main/betaShared_plot.png?raw=true"
+```
+<!-- <center> -->
+<!-- ![](`r url3`){width=60%} -->
+<!-- </center> -->
+
+
