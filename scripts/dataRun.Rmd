@@ -1,0 +1,128 @@
+---
+title: "Data Run"
+output:
+  html_document:
+    df_print: paged
+---
+
+#### Description
+This document assumes you have readied your expression data for an EVE analysis, using [this script](dataClean.Rmd). Below, we will run EVE on the cleaned data, and then extract important information, such as the LRTs and beta estimates, and calculate tissue specificity.
+
+#### Instructions
+
+```{r include=FALSE}
+knitr::knit_child("dataClean.Rmd")
+library(dplyr)
+library(evemodel)
+library(tidyr)
+```
+
+List variable names that hold the tissue datasets
+```{r}
+tissues <- c("brain", "gills", "liver", "spleen")
+datasets <- setNames(c(paste(tissues, "_single", sep = ""), paste(tissues, "_dup", sep = "")), 
+                     c(rep(c("single", "dup"), each = 4)))
+```
+
+Run the betaShared test and store results (this could take a couple of hours)
+```{r eval=FALSE}
+for(i in 1:length(datasets)) {
+  d <- datasets[[i]] #dataset name
+  d.type <- names(datasets[i]) #duplication type
+  tree <- paste(d.type, "tree", sep = "_") #tree name based on duplication type
+  tree %<>% get() #retrieve tree value
+  data <- get(d) #retrieve dataset value
+  res.var <- paste("res", d, sep = ".") #create variable name to store results to
+  print(paste("Analyzing", d))
+  res.val <- betaSharedTest(tree, data, colSpecies = colnames(data), cores = 4) #run betaShared test
+  assign(res.var, res.val) #assign results to the variable name
+}
+```
+
+Extract LRT & beta_i values
+```{r}
+for(i in 1:length(datasets)){
+  d <- datasets[[i]]
+  res <- paste("res", d, sep = ".")
+  # LRTs
+  LRT.var <- paste("LRT", d, sep = ".")
+  LRT.val <- get(res)$LRT
+  names(LRT.val) <- rownames(get(d))
+  assign(LRT.var, LRT.val)
+  # beta_i
+  beta.var <- paste("beta", d, sep = ".")
+  beta.val <- get(res)$indivBetaRes$par[,4]
+  names(beta.val) <- rownames(get(d))
+  assign(beta.var, beta.val)
+}
+```
+
+Rearranging data for visualization
+```{r}
+# Combining LRTs by duplication type
+LRT.single <- as.data.frame(cbind(brain = LRT.brain_single, 
+                                  gills = LRT.gills_single[names(LRT.brain_single)],
+                                  liver = LRT.liver_single[names(LRT.brain_single)],
+                                  spleen = LRT.spleen_single[names(LRT.brain_single)]))
+LRT.dup <- as.data.frame(cbind(brain = LRT.brain_dup, 
+                                  gills = LRT.gills_dup[names(LRT.brain_dup)],
+                                  liver = LRT.liver_dup[names(LRT.brain_dup)],
+                                  spleen = LRT.spleen_dup[names(LRT.brain_dup)]))
+#long form
+LRT.single_long <- LRT.single %>% 
+  mutate(gene = rownames(LRT.single)) %>% 
+  pivot_longer(-gene, names_to = "tissue", values_to = "LRT")
+LRT.dup_long <- LRT.dup %>% 
+  mutate(gene = rownames(LRT.dup)) %>% 
+  pivot_longer(-gene, names_to = "tissue", values_to = "LRT")
+```
+
+```{r}
+# Combining beta_i by duplication type
+beta.single <- as.data.frame(cbind(brain = beta.brain_single, 
+                                  gills = beta.gills_single[names(beta.brain_single)],
+                                  liver = beta.liver_single[names(beta.brain_single)],
+                                  spleen = beta.spleen_single[names(beta.brain_single)]))
+beta.shared_single <- data.frame(tissue = c("brain", "gills", "liver", "spleen"), 
+                                 beta_shared = c(res.brain_single$sharedBeta, res.gills_single$sharedBeta, 
+                                                 res.liver_single$sharedBeta, res.spleen_single$sharedBeta))
+beta.dup <- as.data.frame(cbind(brain = beta.brain_dup, 
+                               gills = beta.gills_dup[names(beta.brain_dup)],
+                               liver = beta.liver_dup[names(beta.brain_dup)],
+                               spleen = beta.spleen_dup[names(beta.brain_dup)]))
+beta.shared_dup <- data.frame(tissue = c("brain", "gills", "liver", "spleen"), 
+                                 beta_shared = c(res.brain_dup$sharedBeta, res.gills_dup$sharedBeta, 
+                                                 res.liver_dup$sharedBeta, res.spleen_dup$sharedBeta))
+#long form
+beta.single_long <- beta.single %>% mutate(gene = rownames(beta.single)) %>% 
+  pivot_longer(-gene, names_to = "tissue", values_to = "beta_i") %>%
+  inner_join(., beta.shared_single, by = "tissue")
+beta.dup_long <- beta.dup %>% mutate(gene = rownames(beta.dup)) %>% 
+  pivot_longer(-gene, names_to = "tissue", values_to = "beta_i") %>%
+  inner_join(., beta.shared_dup, by = "tissue")
+```
+
+```{r}
+# Comprehensive combined dataset that includes LRTs, beta_i, beta_shared, by duplication type
+combined.single <- inner_join(beta.single_long, LRT.single_long, by = c("gene", "tissue"))
+combined.dup <- inner_join(beta.dup_long, LRT.dup_long, by = c("gene", "tissue"))
+```
+
+Calculate tissue specificities using [this file](tissSpec.Rmd)
+```{r include=FALSE}
+knitr::knit_child("tissSpec.Rmd")
+```
+
+Add tissue specificity to comprehensive datasets
+```{r}
+combined.single <- left_join(combined.single, tauExp.filt.long, by = c("gene", "tissue"))
+combined.dup <- left_join(combined.dup, tauExp.filt.long, by = c("gene", "tissue"))
+combined.single$tiss.spec[is.na(combined.single$tiss.spec)] <- "None"
+combined.dup$tiss.spec[is.na(combined.dup$tiss.spec)] <- "None"
+combined.single$tiss.spec <- factor(combined.single$tiss.spec, levels = c("None", "brain", "gills", "liver", "spleen", "Other"))
+combined.dup$tiss.spec <- factor(combined.dup$tiss.spec, levels = c("None", "brain", "gills", "liver", "spleen", "Other"))
+head(combined.single)
+head(combined.dup)
+```
+
+Next step is to [visualize the data](dataVis.Rmd)

@@ -1,0 +1,84 @@
+---
+title: "Tissue Specificity"
+output:
+  html_document:
+    df_print: paged
+---
+
+#### Description
+This document describes the steps to calculate tissue specificity.
+
+#### Instructions
+
+```{r include=FALSE}
+load("tutorial.Rdata")
+library(dplyr)
+remotes::install_github("roonysgalbi/tispec")
+library(tispec)
+```
+
+```{r eval=FALSE, include=FALSE}
+if (!require("BiocManager", quietly = TRUE))
+  install.packages("BiocManager")
+BiocManager::install("BgeeDB")
+library(BgeeDB)
+```
+
+Using BgeeDB to get tissue expression data
+```{r eval=FALSE}
+bgee <- Bgee$new(species = "Salmo_salar", dataType = "rna_seq")
+```
+
+Generate tpm table from diverse tissues
+```{r eval=FALSE}
+data_bgee <- getData(bgee, experimentId = "SRP011583")
+data_bgee <- data_bgee[! data_bgee$Anatomical.entity.name %in% "\"sexually immature organism\"",]
+gene.expression.tpm <- formatData(bgee, data_bgee, callType = "present", stats = "tpm")
+tpm.tissues <- gene.expression.tpm@assayData$exprs
+colnames(tpm.tissues) <- gsub(" ", "_", gsub("\"", "", data_bgee$Anatomical.entity.name[match(colnames(tpm.tissues), data_bgee$Library.ID)]))
+```
+
+```{r}
+head(tpm.tissues)
+```
+
+Using tispec to calculate tissue specificities
+```{r}
+allNAs.idx <- apply(tpm.tissues, 1, function(i) sum(is.na(i))==length(i))
+tpm.tissues.filt <- tpm.tissues[!allNAs.idx,]
+tpm.tissues.filt[is.na(tpm.tissues.filt)] <- 0
+log2Exp <- log2Tran(tpm.tissues.filt) 
+qnExp <- quantNorm(log2Exp)
+tauExp <- calcTau(qnExp) 
+names(tauExp)[2:16] <- colnames(tpm.tissues.filt)
+tauExp <- tauExp[!is.na(tauExp$tau),]
+tauExp <- tauExp %>% dplyr::rename(gills = pharyngeal_gill) %>% 
+  mutate(tiss.spec = unlist(apply(., MARGIN = 1, function(x) {
+  x <- as.data.frame(as.list(x))
+  if(x$tau >= 0.9){
+    tau.max = x %>% dplyr::select(-tau) %>% max()
+    tiss = colnames(x %>% dplyr::select(-tau))[x %>% dplyr::select(-tau) == tau.max]
+    if (any(tiss %in% c("brain", "gills", "liver", "spleen")))
+      return(paste(tiss[tiss %in% c("brain", "gills", "liver", "spleen")], collapse = ","))
+    else 
+      return("Other")
+  }
+  else {
+    return(NA)
+  }
+}, simplify = F), use.names = F))
+```
+
+Filter to only include genes and tissues present in our dataset 
+```{r}
+tauExp.filt <- tauExp %>% 
+  filter(rownames(.) %in% (N7geneIDtbl$Ssal[N7geneIDtbl$N7 %in% genes.all])) %>%
+  dplyr::select(tau, tiss.spec, brain, gills, liver, spleen) 
+#long form
+tauExp.filt.long <- tauExp.filt %>% mutate(gene = N7geneIDtbl$N7[N7geneIDtbl$Ssal %in% rownames(tauExp.filt)]) %>% 
+  pivot_longer(-c(gene, tau, tiss.spec), names_to = "tissue", values_to = "tau.frac")
+```
+
+
+
+

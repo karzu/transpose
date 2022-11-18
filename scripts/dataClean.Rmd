@@ -1,0 +1,186 @@
+---
+title: "Data Cleaning"
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  markdown:
+    wrap: 72
+---
+
+#### Description
+This document describes how to ready your expression data for an EVE analysis. For this process, we will use the expression data and phylogenies included in the `data` folder. Importantly, the data consists of singleton and duplicate genes, and consequently, part of the cleaning process will involve transforming the data such that paired duplicate genes are represented in one row. For the purpose of saving time, some of the objects throughout the scripts have been preloaded in the `tutorial.RData` file. 
+
+#### Instructions
+
+```{r include=FALSE}
+load("tutorial.RData")
+library(ape)
+library(clusterProfiler)
+library(dplyr)
+library(evemodel)
+library(tibble)
+```
+
+```{r}
+salmonids <- c("Ssal", "Omyk", "Okis", "Salp", "Hhuc", "Tthy") 
+outgroup <- c("Drer", "Olat", "Gacu", "Eluc", "Nhub", "Upyg")
+```
+
+Read in trees and remove irrelevant species
+```{r}
+single_tree <- read.tree("../data/SpeciesTree_rooted_node_labels.txt") 
+single_tree <- keep.tip(single_tree, single_tree$tip.label[-c(1:2)])
+dup_tree <- read.tree("../data/SpeciesTree_rooted_node_labels_duplicated.txt") # duplicated
+dup_tree <- keep.tip(dup_tree, dup_tree$tip.label[-c(1:2)])
+```
+
+Singleton tree 
+```{r}
+plot(single_tree) 
+```
+Duplicate tree
+```{r}
+plot(dup_tree)
+```
+
+Load in tissue TPM data
+```{r}
+brain <- readRDS("../data/combExprMat_Br.RDS") %>% as.data.frame() 
+gills <- readRDS("../data/combExprMat_Gi.RDS") %>% as.data.frame() 
+liver <- readRDS("../data/combExprMat_Li.RDS") %>% as.data.frame() 
+spleen <- readRDS("../data/combExprMat_Sp.RDS") %>% as.data.frame()
+```
+
+N2 to N7 geneID table (clade geneID translation)
+```{r}
+N7geneIDtbl <- readRDS("../data/N7geneIDtbl.RDS")
+```
+
+Remove genes with little to no expression
+```{r eval=FALSE}
+removeGenes <- function(data) { 
+  salmonidCols = colnames(data) %in% salmonids
+  # Note that log2(0.01) means no expression, i.e. TPM=0
+  exprCheckTbl <- tibble(N7 = rownames(data), salmidHasExpr = rowMeans(data[,salmonidCols] > log2(0.01)) > 0.5, 
+                         outHasExpr = rowMeans(data[,!salmonidCols] > log2(0.01)) > 0.5,  
+                         hasVar = apply(data, 1, var) > 0) %>% # For each N2, check that all salmonid clades and out-group has the                               minimum expression
+                  left_join(dplyr::select(N7geneIDtbl,N2,N7,dup_type), by="N7") %>%
+                  group_by(N2) %>% 
+                  mutate( allExpr = all(salmidHasExpr) & outHasExpr, allVar = any(hasVar)) %>% 
+                  ungroup()
+
+data_filtered <- data[filter(exprCheckTbl, allExpr == T, allVar == T)$N7,]
+
+return(data_filtered) 
+}
+
+brain_filt <- removeGenes(brain) 
+gills_filt <- removeGenes(gills)
+liver_filt <- removeGenes(liver) 
+spleen_filt <- removeGenes(spleen)
+```
+
+Only include shared genes among all tissues
+```{r eval=FALSE}
+sharedGenes <- Reduce(intersect, lapply(list(brain_filt, gills_filt,liver_filt, spleen_filt), rownames)) 
+brain_clean <- brain_filt[rownames(brain_filt) %in% sharedGenes,] 
+gills_clean <- gills_filt[rownames(gills_filt) %in% sharedGenes,] 
+liver_clean <- liver_filt[rownames(liver_filt) %in% sharedGenes,] 
+spleen_clean <- spleen_filt[rownames(spleen_filt) %in% sharedGenes,]
+```
+
+Split geneID table by duplicate and singleton genes
+```{r eval=FALSE}
+single_tbl <- N7geneIDtbl %>% filter(dup_type == "single")
+dup_tbl <- N7geneIDtbl %>% filter(dup_type == "duplicate")
+```
+
+Split tissue TPM data by singleton and duplicate genes
+```{r eval=FALSE}
+brain_single <- brain_clean[rownames(brain_clean) %in% single_tbl$N7,] 
+gills_single <- gills_clean[rownames(gills_clean) %in% single_tbl$N7,]
+liver_single <- liver_clean[rownames(liver_clean) %in% single_tbl$N7,] 
+spleen_single <- spleen_clean[rownames(spleen_clean) %in% single_tbl$N7,]
+
+brain_dup <- brain_clean[rownames(brain_clean) %in% dup_tbl$N7,] 
+gills_dup <- gills_clean[rownames(gills_clean) %in% dup_tbl$N7,]
+liver_dup <- liver_clean[rownames(liver_clean) %in% dup_tbl$N7,] 
+spleen_dup <- spleen_clean[rownames(spleen_clean) %in% dup_tbl$N7,]
+```
+
+Find duplicate N7 pairs
+```{r eval=FALSE}
+N2_dups <- unique(dup_tbl$N2) 
+N7_pairs <- NULL 
+for(dup in N2_dups) {  
+  pair <- dup_tbl %>% 
+    filter(N2 == dup) %>% 
+    dplyr::select(N7)  
+  N7_pairs <- rbind(N7_pairs, pair$N7)
+} 
+N7_pairs <- as.data.frame(N7_pairs) 
+names(N7_pairs) <- c("Key","Pair")
+```
+
+Transform the duplicated TPM data to include paired duplicates in one row
+```{r eval=FALSE}
+dupTransform <- function(gene.data) { 
+  # function definition for returning second copy, given first copy
+  keyPair <- function(data, key) { 
+    pair = data %>% 
+      filter(Key == key) %>% 
+      dplyr::select(Pair)
+    return(as.vector(pair[[1]])) 
+  }
+
+  copy <- as.data.frame(gene.data) # copying data for safety 
+  names <- colnames(copy) 
+  salmonIndex <- colnames(copy) %in% salmonids %>% which() 
+  outgroupIndex <- colnames(copy) %in% outgroup %>% which()
+  colnames(copy) %<>% replace(salmonIndex, paste(.[salmonIndex], "1", sep="")) # rename original salmonid clade ("Ssal" is now "Ssal1")
+
+  # set up duplicate salmonid clade 
+  dupClade <- paste(names[salmonIndex], "2", sep="") # names for dup clade ("Ssal2"...) 
+  names <- c(colnames(copy), dupClade) 
+  dupCladeIndex <- names %in% dupClade %>% which() # indices for dup clade 
+  copy[,dupClade] <- NA # create columns for duplicate clade 
+  colnames(copy) <- names
+
+  for (rowName in rownames(copy)) { 
+    # duplicated gene, first copy 
+    if(rowName %in% N7_pairs$Key == TRUE) { 
+      pairName <- keyPair(N7_pairs,rowName) # find second copy of duplicated gene
+
+      # make sure outgroup values are the same between copies; otherwise throws an error
+      stopifnot(copy[rowName, outgroupIndex] == copy[pairName, outgroupIndex])
+      
+      copy[rowName, dupCladeIndex] <- copy[pairName, salmonIndex] # fill in duplicate clade with pair values
+      copy <- copy[!rownames(copy) %in% pairName, ] # delete duplicated gene's second copy
+    }
+  }
+
+  return(copy) 
+}
+
+brain_dup %<>% dupTransform 
+gills_dup %<>% dupTransform 
+liver_dup %<>% dupTransform 
+spleen_dup %<>% dupTransform
+```
+
+For notebook keeping, store all single and duplicate gene names separately
+```{r eval=FALSE}
+genes.single <- rownames(brain_single) %>% 
+  data.frame(N7 = .) %>%
+  left_join(., N7geneIDtbl, by = "N7") %>% 
+  dplyr::select(N7, Ssal)
+genes.dup <- rownames(brain_dup) %>% 
+  data.frame(N7 = .) %>%
+  left_join(., N7geneIDtbl, by = "N7") %>% 
+  dplyr::select(N7, Ssal)
+genes.all <- rbind(genes.single, genes.dup)
+```
+
+
+

@@ -1,0 +1,202 @@
+---
+title: "Visualizing EVE runs by duplication type"
+output:
+  html_document:
+    df_print: paged
+---
+
+#### Description
+This document assumes the reader has gone through both the [data cleaning](dataClean.Rmd) and [EVE analysis](dataRun.Rmd) scripts. Having extracted the LRTs and beta estimates, as well as the tissue specificities, we will now present some valuable plots.
+
+#### Instructions
+
+```{r include=FALSE}
+knitr::knit_child("dataRun.Rmd")
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+library(plyr)
+library(plotly)
+library(RColorBrewer)
+```
+
+Indicate duplication type for analysis
+```{r}
+data <- combined.single # this variable will be passed to the plots below; alternative is 'combined.dup'
+```
+
+Histograms of LRT per tissue
+```{r}
+p1 <- ggplot(data, aes(x=LRT, fill=tissue)) + geom_histogram(bins=50, color="black", alpha = 0.5)
+p1 <- p1 + facet_wrap(vars(tissue)) + ggtitle("Histograms of LRTs by tissue") + 
+  labs(x=expression("LRT"["log"])) +
+  theme(legend.position = "none", plot.title = element_text(hjust = 0.5), 
+        strip.background = element_rect(colour="black",fill="white"))
+p1
+```
+
+Histograms of $\beta_i$ per tissue
+```{r}
+p2 <- ggplot(data, aes(x=beta_i, col = beta_i>beta_shared, fill = beta_i>beta_shared)) + geom_histogram(bins=50, alpha = 0.5) + 
+  scale_x_log10() + geom_vline(aes(xintercept=beta_shared), col = "red") 
+p2 <- p2 + facet_wrap(vars(tissue)) + ggtitle(expression(paste("Histograms of ", beta[i], " by tissue"))) + 
+  labs(x=expression(beta[i])) +
+  theme(legend.title = element_blank(), plot.title = element_text(hjust = 0.5), 
+        strip.background = element_rect(colour="black",fill="white")) +
+  scale_fill_manual(values = c("dodgerblue4", "firebrick4"), labels = c("Divergence", "Diversity")) +
+   scale_color_manual(values = c("cornflowerblue", "brown4"), labels = c("Divergence", "Diversity")) 
+p2
+```
+
+Proportions of tissue-specific genes
+```{r}
+tiss.freq <- data %>% filter(tissue == "brain")
+p3 <- ggplot(tiss.freq, aes(y = tiss.spec, fill = tiss.spec)) + 
+  geom_bar(aes(x = (..count..)/sum(..count..)), color="white", alpha = 0.7) + 
+  xlab("Proportion") + 
+  ylab("Tissue Specificity") + 
+  ggtitle("Proportions of tissue-specific genes") + 
+  theme(plot.title = element_text(hjust = 0.5))
+p3
+```
+
+Pairs of LRTs for each pair of tissue
+```{r}
+LRTs <- data %>% select(gene, tissue, LRT) %>% pivot_wider(names_from = tissue, values_from = LRT)
+#calculate correlation
+corr <- cor(LRTs %>% select(-gene))
+corr_long <- as.data.frame(corr) %>% 
+  mutate("tissue.x" = rownames(.)) %>% 
+  pivot_longer(-tissue.x, names_to = "tissue.y", values_to = "corr") %>%
+  filter(tissue.x < tissue.y)
+  
+#plot
+p4 <- data %>% inner_join(., ., by = c("gene", "tau", "tiss.spec")) %>% filter(tissue.x < tissue.y) %>% ggplot() +
+  geom_point(aes(LRT.x, LRT.y, shape = tiss.spec, col = tiss.spec, alpha = (tiss.spec %in% c("brain", "gills", "liver", "spleen")))) + 
+  geom_abline(slope=1, intercept=0, color = "red", alpha=0.5) +
+  scale_alpha_discrete(range = c(0.3, 0.8), guide = "none") +
+  geom_label(data = corr_long, aes(x = 35, y = 100, label = paste("corr = ", round(corr, 3), sep = "")))
+p4 <- p4 + facet_wrap(tissue.x ~ tissue.y, labeller = "label_both") + 
+  ggtitle("LRTs for pairs of tissue") +
+  labs(x=expression(paste(""["log"], "LRT"["x"])), y = expression(paste(""["log"], "LRT"["y"]))) +
+  theme(plot.title = element_text(hjust = 0.5), strip.background = element_rect(colour="black",fill="white")) 
+p4 <- p4 + scale_color_manual(values = rev(brewer.pal(8, "Accent")[c(1:3,5,6,8)])) 
+p4
+```
+
+
+Pairs of $\beta_i$ for each pair of tissue
+```{r}
+betas <- data %>% select(gene, tissue, beta_i) %>% pivot_wider(names_from = tissue, values_from = beta_i)
+beta_shared <- data %>% select(tissue, beta_shared) %>% unique()
+#table used for plotting; describes boundary conditions for direction of selection
+rect <- function(data){
+  bx = data[1]
+  by = data[2]
+  rect <- data.frame(xmin = c(0, bx, 0, bx), xmax = c(bx, Inf, bx, Inf), 
+                     ymin = c(0, by, by, 0), ymax = c(by, Inf, Inf, by), 
+                     direction = c("Divergence", "Diversity", "Mismatch", "Mismatch"))
+  rect[,1:4] <- apply(rect[,1:4], 2, as.numeric)
+  return(rect)
+}
+  
+rect_data <- beta_shared %>% full_join(., ., by = character()) %>% filter(tissue.x < tissue.y)
+boundaries <- data.frame(xmin = c(), xmax = c(), ymin = c(), ymax = c(), direction = c(), tissue.x = c(), tissue.y = c())
+for (i in 1:nrow(rect_data)){
+  beta.x <- rect_data$beta_shared.x[i]
+  beta.y <- rect_data$beta_shared.y[i]
+  t.x <- rect_data$tissue.x[i]
+  t.y <- rect_data$tissue.y[i]
+  boundaries <- rbind(boundaries, cbind(rect(c(beta.x, beta.y)), tissue.x = t.x, tissue.y = t.y))
+}
+  
+#calculate correlation
+corr <- cor(betas %>% select(-gene))
+corr_long <- as.data.frame(corr) %>% 
+  mutate("tissue.x" = rownames(.)) %>% 
+  pivot_longer(-tissue.x, names_to = "tissue.y", values_to = "corr") %>%
+  filter(tissue.x < tissue.y)
+  
+#plot
+p5 <- data %>% inner_join(., ., by = "gene") %>% filter(tissue.x < tissue.y) %>% ggplot() +
+  geom_point(aes(beta_i.x, beta_i.y), alpha=0.5) + geom_vline(aes(xintercept = beta_shared.x), color = "red", alpha=0.5) +
+  geom_hline(aes(yintercept = beta_shared.y), color = "red", alpha=0.5) + 
+  geom_rect(data = boundaries, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = direction), alpha = 0.2) +
+  scale_x_log10() + scale_y_log10() +
+  geom_label(data = corr_long, aes(x = 5, y = 100, label = paste("corr = ", round(corr, 3), sep = "")))
+p5 <- p5 + facet_wrap(tissue.x ~ tissue.y, labeller = "label_both") + 
+  ggtitle(expression(paste(beta[i], " for pairs of tissue"))) +
+  labs(x=expression(paste(""[x], beta[i])), y = expression(paste(""[y], beta[i]))) +
+  theme(legend.title = element_blank(), plot.title = element_text(hjust = 0.5), 
+        strip.background = element_rect(colour="black",fill="white")) +
+  scale_fill_manual(values = c("blue", "green", "red")) 
+p5
+```
+
+Volcano plots of LRTs vs $\beta_i$
+```{r}
+p6 <- ggplot(data, aes(x=beta_i, y=LRT, col = beta_i>beta_shared, fill = beta_i>beta_shared)) + 
+  geom_point(alpha = 0.5) + scale_x_log10() 
+p6 <- p6 + facet_wrap(vars(tissue)) + labs(y = expression("LRT"[])) + 
+  ggtitle(expression(paste("Volcano plots of LRTs vs. ", beta[i], " by tissue"))) +
+  labs(x = expression(beta[i]), y = expression("LRT"["log"])) + 
+  theme(plot.title = element_text(hjust = 0.5), legend.title = element_blank(), 
+        strip.background = element_rect(colour="black",fill="white")) +
+  scale_fill_manual(values = c("dodgerblue4", "firebrick4"), labels = c("Divergence", "Diversity"), na.translate = F) +
+  scale_color_manual(values = c("cornflowerblue", "brown4"), labels = c("Divergence", "Diversity"), na.translate = F) 
+p6
+```
+Expression profiles for significant genes
+```{r}
+# Find the significant genes based on high LRTs (LRT >= 10) among singletons and duplicates
+LRT.single_sig <- combined.single %>% 
+  filter(LRT>=10) %>% 
+  mutate("dtype" = "single") %>%
+  mutate("direction" = ifelse(beta_i > beta_shared, "diversity", "divergence"))
+LRT.dup_sig <- combined.dup %>% 
+  filter(LRT>=10) %>% 
+  mutate("dtype" = "duplicate") %>%
+  mutate("direction" = ifelse(beta_i > beta_shared, "diversity", "divergence"))
+
+# Combine the lists
+LRT.sig <- rbind(LRT.single_sig, LRT.dup_sig)
+```
+
+```{r eval=FALSE}
+# Function to make an informative expression profile plot
+expProf <- function(gene, tpm.data, dtype, tiss, dir, lrt){
+  plot.data <- tpm.data[gene, ] %>% 
+    pivot_longer(everything(), names_to = "species", values_to = "tpm") %>%
+    mutate(clade = ifelse(!species %in% outgroup, "salmonid", "outgroup"))
+  plot.data$species <- factor(plot.data$species, levels = unique(plot.data$species))
+  p <- ggplot(plot.data, aes(x = species, y = tpm, fill = clade)) + geom_boxplot()
+  p <- p + labs(title = paste("Expression profile for gene ", gene, sep = ""), 
+           subtitle = paste("dtype: ", dtype, "\t Tissue: ", tiss, "\t LRT: ", lrt, "\t Signature: ", dir, sep = "")) +
+    ylab("gene expression") + theme(axis.text.x=element_text(angle=45, vjust = 1, hjust = 1))
+  return(p)
+}
+```
+
+```{r eval=FALSE}
+# The following nested loop creates a pdf for each combination of of tissue-selection direction-duplication type. Within each pdf is a set of expression profiles for the significant genes. 
+for(dtype in c("single", "duplicate")){
+  for(dir in c("divergence", "diversity")){
+    for(tiss in tissues){
+      pdf.file <- paste(paste(tiss, dir, dtype, sep = "_"), ".pdf", sep = "")
+      pdf(pdf.file) #open pdf
+      # filter for significant genes by tissue, dtype, and direction
+      df <- LRT.sig %>% filter(dup_type == dtype, tissue == tiss, direction == dir) %>% arrange(desc(LRT))
+      suffix <- ifelse(dtype == "duplicate", "dup", "single")
+      tpm.data <- get(paste(tiss, suffix, sep = "_"))
+      for(i in 1:nrow(df)){
+        gene.N7 <- df$gene[i]
+        gene.Ssal <- df$Ssal[i]
+        lrt <- round(df$LRT[i], 2)
+        plot(expProf(gene.N7, gene.Ssal, tpm.data, dtype, tiss, dir, lrt))
+      }
+      dev.off()
+    }
+  }
+}
+```
+
